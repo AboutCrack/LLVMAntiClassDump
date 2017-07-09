@@ -1,7 +1,6 @@
 /*
  *  LLVM AntiClassDump Pass
  *  Zhang@University of Glasgow
- *  This is designed to be a LTO pass so we have a global view of all the TUs
  *
  */
 
