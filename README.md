@@ -11,6 +11,8 @@ Initially planned to keep private because:
 
 However since it only requires runtime dump to defeat this ```protection```, releasing it seems to be OK
 
+(Not exactly that easy due to the nature of  ```+initialize```)
+
 # Note
 By using the same technique at the LTO Stage, global SEL/ClassName obfuscation is possible without having to filter System SEL/ClassNames.
 
