@@ -17,6 +17,7 @@
 #include "llvm/Transforms/Obfuscation/AntiClassDump.h"
 #include "llvm/Transforms/Obfuscation/Utils.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include <tgmath.h>
 #include <cstdlib>
 #include <iostream>
 #include <regex>
@@ -85,6 +86,10 @@ struct AntiClassDump : public ModulePass {
                                 HandleClass(cls,localdep[cls],EntryBB);
                         }
                 }
+                //TODO: Handle Protocols
+
+                IRBuilder<> IRB(EntryBB);
+                IRB.CreateRetVoid ();
                 return false;
         } // runOnModule
         void HandleClass(string subName,string supCls,BasicBlock* BB){
@@ -98,13 +103,13 @@ struct AntiClassDump : public ModulePass {
                 classReplaceMethodTypeArgs.push_back(IMPPointerType);
                 classReplaceMethodTypeArgs.push_back(Type::getInt8PtrTy(M->getContext()));
                 FunctionType *class_replaceMethod_type =
-                     FunctionType::get(IMPPointerType, classReplaceMethodTypeArgs,false);
+                        FunctionType::get(IMPPointerType, classReplaceMethodTypeArgs,false);
                 Function *class_replaceMethod = cast<Function>(M->getOrInsertFunction("class_replaceMethod", class_replaceMethod_type));
                 FunctionType *sel_registerName_type =
-                     FunctionType::get(Type::getInt8PtrTy(M->getContext()),
-                                       {Type::getInt8PtrTy(M-> getContext())}, false);
+                        FunctionType::get(Type::getInt8PtrTy(M->getContext()),
+                                          {Type::getInt8PtrTy(M->getContext())}, false);
                 Function *sel_registerName = dyn_cast<Function>(
-                     M->getOrInsertFunction("sel_registerName", sel_registerName_type));
+                        M->getOrInsertFunction("sel_registerName", sel_registerName_type));
                 vector<Type*> allocaClsTypeVector;
                 allocaClsTypeVector.push_back(Type::getInt8PtrTy(M->getContext()));
                 allocaClsTypeVector.push_back(Type::getInt8PtrTy(M->getContext()));
@@ -119,7 +124,25 @@ struct AntiClassDump : public ModulePass {
                 Function *objc_getClass = dyn_cast<Function>(
                         M->getOrInsertFunction("objc_getClass", objc_getClass_type));
                 Function *objc_getMetaClass = dyn_cast<Function>(
-                             M->getOrInsertFunction("objc_getMetaClass", objc_getClass_type));
+                        M->getOrInsertFunction("objc_getMetaClass", objc_getClass_type));
+                FunctionType *objc_registerClassPair_type =FunctionType::get(Type::getVoidTy(M->getContext()),
+                                                                             {Type::getInt8PtrTy(M->getContext())}, false);
+                Function *objc_registerClassPair = dyn_cast<Function>(M->getOrInsertFunction("objc_registerClassPair",objc_registerClassPair_type));
+
+                FunctionType* class_addIvarType=FunctionType::get(Type::getInt8Ty(M->getContext()),
+                                                                  {Type::getInt8PtrTy(M->getContext()),Type::getInt8PtrTy(M->getContext()),Type::getInt64Ty(M->getContext()),Type::getInt8Ty(M->getContext()),Type::getInt8PtrTy(M->getContext())}, false);
+
+                Function *class_addIvar = dyn_cast<Function>(
+                        M->getOrInsertFunction("class_addIvar",class_addIvarType));
+                //class_addIvar->addFnAttr(Attribute::SExt);
+                class_addIvar->addParamAttr(3,Attribute::ZExt);//Missing SignExt for return type
+                //TODO: Handle cases where struct.objc_property_attribute_t is NOT defined
+                Type* objc_property_attribute=M.getTypeByName("struct.objc_property_attribute_t");
+                FunctionType * class_addProperty_type=FunctionType::get(Type::getVoidTy(M->getContext()),
+                                                                             {Type::getInt8PtrTy(M->getContext()),Type::getInt8PtrTy(M->getContext()),objc_property_attribute->getPointerTo(),Type::getInt64Ty(M->getContext())}, false);
+
+                Function* class_addProperty=dyn_cast<Function>(
+                        M->getOrInsertFunction("class_addProperty",class_addProperty_type));
                 //End ObjC Runtime Declarations
 
                 errs()<<"Creating Class:"<<subName<<"\n";
@@ -140,8 +163,6 @@ struct AntiClassDump : public ModulePass {
                         M->getGlobalVariable(ClassMethodListGVName, true);
                 GlobalVariable *InstanceMethodListGV =
                         M->getGlobalVariable(StringRef(InstanceMethodListGVName), true);
-                // Collect Methods.
-                // Construct +initialize if needed
                 vector<tuple<string /*SEL*/, string /*Method Signature*/,Function * /*IMP*/> > ClassMethodList;
                 vector<tuple<string /*SEL*/, string /*Method Signature*/,Function * /*IMP*/> > InstanceMethodList;
                 if (ClassMethodListGV!=nullptr&&ClassMethodListGV->hasInitializer()) {
@@ -219,16 +240,6 @@ struct AntiClassDump : public ModulePass {
                         Value* SEL=IRB.CreateCall(sel_registerName,{SELStr});
                         Value* SIG=IRB.CreateGlobalStringPtr(StringRef(get<1>(IMtuple)));
                         Value* IMPFunc=IRB.CreateBitCast(get<2>(IMtuple),IMPPointerType);
-                        class_replaceMethod->print(errs());
-                        errs()<<"\n";
-                        Cls->print(errs());
-                        errs()<<"\n";
-                        SEL->print(errs());
-                        errs()<<"\n";
-                        IMPFunc->print(errs());
-                        errs()<<"\n";
-                        SIG->print(errs());
-                        errs()<<"\n";
                         IRB.CreateCall(class_replaceMethod,{Cls,SEL,IMPFunc,SIG});
                 }
                 for(tuple<string, string, Function *> IMtuple:ClassMethodList) {
@@ -242,11 +253,108 @@ struct AntiClassDump : public ModulePass {
                         IRB.CreateCall(class_replaceMethod,{MetaCls,SEL,IMPFunc,SIG});
                 }
                 //Now Handle Property and ivar
-                //\01l_OBJC_$_PROP_LIST_
-                //\01l_OBJC_$_INSTANCE_VARIABLES_
+                errs()<<"Adding Property and Ivars For Class:"<<subName<<"\n";
+                string propertyListGVName = "\01l_OBJC_$_PROP_LIST_";
+                propertyListGVName.append(subName);
+                string ivarListGVName = "\01l_OBJC_$_INSTANCE_VARIABLES_";
+                ivarListGVName.append(subName);
+                GlobalVariable *propertyListGV =
+                        M->getGlobalVariable(propertyListGVName, true);
+                GlobalVariable *ivarListGV =
+                        M->getGlobalVariable(StringRef(ivarListGVName), true);
+                vector<tuple<GlobalVariable* /*ivarOffsetGV*/, StringRef /*IVAR NAME*/,StringRef /*ivar type*/,ConstantInt* /*IVAR SIZE*/> > ivarList;
+                vector<tuple<StringRef /*PROP NAME*/,StringRef /*PROP ATTR*/> > propList;
+                if (ivarListGV !=nullptr&&ivarListGV->hasInitializer()) {//Collect IVARs
+                        ConstantStruct *Init = reinterpret_cast<ConstantStruct *>(
+                                ivarListGV->getInitializer());
+                        ConstantArray *objc_ivar_struct =
+                                dyn_cast<ConstantArray>(Init->getOperand(2));
+                        for (unsigned int idx = 0; idx < objc_ivar_struct->getNumOperands();
+                             idx++) {
+                                ConstantStruct* ivarstruct=dyn_cast<ConstantStruct>(objc_ivar_struct->getOperand(idx));
+                                GlobalVariable* ivarOffsetGV=dyn_cast<GlobalVariable>(ivarstruct->getOperand(0));
+
+                                GlobalVariable* ivarNameGV =dyn_cast<GlobalVariable>(dyn_cast<ConstantExpr>(ivarstruct->getOperand(1))->getOperand(0));
+                                StringRef ivarName=dyn_cast<ConstantDataArray>(ivarNameGV->getInitializer())->getAsString();
+                                GlobalVariable* ivarTypeGV =dyn_cast<GlobalVariable>(dyn_cast<ConstantExpr>(ivarstruct->getOperand(2))->getOperand(0));
+                                StringRef ivarType=dyn_cast<ConstantDataArray>(ivarTypeGV->getInitializer())->getAsString();
+
+                                //index 3 on 32bit maybe? 4 on 64bit. So we just retreive the last one
+                                ConstantInt* ivarSize=dyn_cast<ConstantInt>(ivarstruct->getOperand(ivarstruct->getNumOperands ()-1));
+                                ivarList.push_back(make_tuple(ivarOffsetGV,ivarName,ivarType,ivarSize));
+                        }
+                }
+                if(propertyListGV!=nullptr&&propertyListGV->hasInitializer()) {
+                        ConstantStruct *Init = reinterpret_cast<ConstantStruct *>(
+                                propertyListGV->getInitializer());
+                        ConstantArray *objc_prop_struct =
+                                dyn_cast<ConstantArray>(Init->getOperand(2));
+                        for (unsigned int idx = 0; idx < objc_prop_struct->getNumOperands();
+                             idx++) {
+                                ConstantStruct* propstruct=dyn_cast<ConstantStruct>(objc_prop_struct->getOperand(idx));
+                                ;
+                                StringRef name=dyn_cast<ConstantDataArray>(dyn_cast<GlobalVariable>(dyn_cast<ConstantExpr>(propstruct->getOperand(0))
+                                                                                                    ->getOperand(0))->getInitializer())->getAsString();
+                                StringRef attri=dyn_cast<ConstantDataArray>(dyn_cast<GlobalVariable>(dyn_cast<ConstantExpr>(propstruct->getOperand(1))
+                                                                                                     ->getOperand(0))->getInitializer())->getAsString();
+                                propList.push_back(make_tuple(name,attri));
+
+                        }
+                }
+                //TODO: Now use IRB to add props and ivars
+                //Parse PropertyString using https://developer.apple.com/library/content/documentation/Cocoa/Conceptual/ObjCRuntimeGuide/Articles/ocrtPropertyIntrospection.html
+
+                for(tuple<GlobalVariable* /*ivarOffsetGV*/, StringRef /*IVAR NAME*/,StringRef /*ivar type*/,ConstantInt* /*IVAR SIZE*/> tup:ivarList) {
+                        Value* IvarNamePtr=IRB.CreateGlobalStringPtr(get<1>(tup));
+                        Value* IvarTypePtr=IRB.CreateGlobalStringPtr(get<2>(tup));
+                        vector<Value*> Args;
+                        Args.push_back(Cls);
+                        Args.push_back(IvarNamePtr);
+                        Args.push_back(get<3>(tup));
+                        //Calculate alignment from https://stackoverflow.com/questions/33184826/what-does-class-addivars-alignment-do-in-objective-c
+                        //Maybe use <llvm/Support/AlignOf.h> instead?
+                        uint64_t align=log2(get<3>(tup)->getZExtValue ());
+                        Args.push_back(ConstantInt::getSigned(Type::getInt8Ty(M->getContext()),align));
+                        Args.push_back(IvarTypePtr);
+                        IRB.CreateCall(class_addIvar,ArrayRef<Value*>(Args));
+                }
+                for(tuple<StringRef /*PROP NAME*/,StringRef /*PROP ATTR*/> tup:propList) {
+                        //Split PropertyAttribute String and recreate a list of sub-attribute strings
+                        //Copied from https://stackoverflow.com/questions/14265581/parse-split-a-string-in-c-using-string-delimiter-standard-c
+                        vector<string> attributeList;
+                        string delim = ",";
+                        string s=get<1>(tup).str();
+                        auto start = 0U;
+                        auto end = s.find(delim);
+                        while (end != string::npos)
+                        {
+                                string substr=s.substr(start, end - start);
+                                attributeList.push_back(substr.substr(0,1));
+                                attributeList.push_back(substr.substr(1,string::npos));
+                                start = end + delim.length();
+                                end = s.find(delim, start);
+                        }
+                        ArrayType* propAT=ArrayType::get(Type::getInt8Ty(M->getContext()),attributeList.size());
+                        vector<Constant*> stringList;
+                        for(string sub:attributeList){
+                          GlobalVariable * GV=IRB.CreateGlobalString(sub);
+                          stringList.push_back(GV);
+                        }
+                        //Create GEPs to build objc_property_attribute_*
+                        IRB.CreateAlloca(objc_property_attribute,stringList.size());
+
+
+
+                }
+
+
+                //TODO: Replace references to original structs and GVs
+
+                IRB.CreateCall(objc_registerClassPair,{Cls});
+
         }
-        StringRef getPassName() const override{
-          return "AntiClassDump";
+        StringRef getPassName() const override {
+                return "AntiClassDump";
         }
 
 };  // struct
@@ -256,7 +364,3 @@ Pass *createAntiClassDump() {
 } // namespace llvm
 
 char AntiClassDump::ID = 0;
-/*
-   //ObjC runtime definitions
-
-   //*/
